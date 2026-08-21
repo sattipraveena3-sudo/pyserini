@@ -27,13 +27,22 @@ jobs:
           sudo docker image prune --all --force || true
 
       - name: Install runtime
+        working-directory: /tmp
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyserini faiss-cpu numpy
+          python - <<'PY'
+          import pyserini
+          print('PYSERINI_PATH', pyserini.__file__)
+          assert '/site-packages/' in pyserini.__file__, pyserini.__file__
+          PY
 
       - name: Prepare NFCorpus
+        working-directory: /tmp
         run: |
-          mkdir -p collections indexes runs
+          rm -rf pyserini-deeper
+          mkdir -p pyserini-deeper/collections pyserini-deeper/indexes pyserini-deeper/runs
+          cd pyserini-deeper
           wget -q https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip -P collections
           unzip -q collections/nfcorpus.zip -d collections
           python - <<'PY'
@@ -49,6 +58,7 @@ jobs:
           PY
 
       - name: Encode BGE dense vectors and build Faiss index
+        working-directory: /tmp/pyserini-deeper
         run: |
           python -m pyserini.encode \
             input --corpus collections/nfcorpus/corpus.jsonl --fields title text \
@@ -57,6 +67,7 @@ jobs:
                     --pooling mean --fields title text --batch 16
 
       - name: Verify dense vectors and manual score
+        working-directory: /tmp/pyserini-deeper
         run: |
           python - <<'PY' | tee dense-deeper.txt
           import faiss, numpy as np
@@ -73,15 +84,23 @@ jobs:
           PY
 
       - name: Build sparse BM25 NFCorpus index
+        working-directory: /tmp/pyserini-deeper
         run: |
+          python - <<'PY'
+          import pyserini
+          print('INDEX_PYSERINI_PATH', pyserini.__file__)
+          assert '/site-packages/' in pyserini.__file__, pyserini.__file__
+          PY
           python -m pyserini.index.lucene \
             --collection JsonCollection \
             --input collections/nfcorpus/pyserini-corpus \
             --index indexes/lucene.nfcorpus \
             --generator DefaultLuceneDocumentGenerator \
             --storePositions --storeDocvectors --storeRaw
+          test -d indexes/lucene.nfcorpus
 
       - name: Verify sparse representation and manual BM25 score
+        working-directory: /tmp/pyserini-deeper
         run: |
           python - <<'PY' | tee sparse-deeper.txt
           from pyserini.index.lucene import LuceneIndexReader
@@ -107,6 +126,6 @@ jobs:
         with:
           name: deeper-dense-sparse-evidence
           path: |
-            dense-deeper.txt
-            sparse-deeper.txt
+            /tmp/pyserini-deeper/dense-deeper.txt
+            /tmp/pyserini-deeper/sparse-deeper.txt
           if-no-files-found: ignore
