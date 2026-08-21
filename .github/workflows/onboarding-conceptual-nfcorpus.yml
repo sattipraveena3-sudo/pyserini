@@ -1,0 +1,128 @@
+name: onboarding-conceptual-nfcorpus
+
+on:
+  push:
+    branches: [onboarding-reproduction]
+  pull_request:
+    branches: [master]
+
+jobs:
+  conceptual-framework:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyserini numpy
+      - name: Verify BM25 as sparse bi-encoder
+        run: |
+          python - <<'PY' | tee conceptual.txt
+          import numpy as np
+          from pyserini.index.lucene import LuceneIndexReader
+          from pyserini.analysis import Analyzer, get_lucene_analyzer
+          from pyserini.search.lucene import LuceneSearcher
+
+          reader = LuceneIndexReader.from_prebuilt_index('msmarco-v1-passage')
+          tf = reader.get_document_vector('7187158')
+          bm25 = {t: reader.compute_bm25_term_weight('7187158', t, analyzer=None) for t in tf.keys()}
+          analyzer = Analyzer(get_lucene_analyzer())
+          qtokens = analyzer.analyze("what is paula deen's brother")
+          q = {t: 1 for t in qtokens}
+          terms = set(bm25) | set(q)
+          dvec = np.array([bm25.get(t, 0.0) for t in terms])
+          qvec = np.array([q.get(t, 0.0) for t in terms])
+          manual = float(np.dot(qvec, dvec))
+
+          searcher = LuceneSearcher.from_prebuilt_index('msmarco-v1-passage')
+          hit = searcher.search("what is paula deen's brother", k=1)[0]
+          print('query_tokens=', qtokens)
+          print('manual_dot_product=', manual)
+          print('lucene_top_doc=', hit.docid)
+          print('lucene_score=', hit.score)
+          assert hit.docid == '7187158'
+          assert abs(manual - hit.score) < 1e-3, (manual, hit.score)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conceptual-framework-evidence
+          path: conceptual.txt
+
+  nfcorpus-contriever:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+      - name: Install runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyserini faiss-cpu
+      - name: Prepare NFCorpus
+        run: |
+          mkdir -p collections indexes runs
+          wget -q https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip -P collections
+          unzip -q collections/nfcorpus.zip -d collections
+          python - <<'PY'
+          import json
+          with open('collections/nfcorpus/queries.tsv','w') as out:
+              for line in open('collections/nfcorpus/queries.jsonl'):
+                  x=json.loads(line); out.write(x['_id']+'\t'+x['text']+'\n')
+          PY
+          tail -n +2 collections/nfcorpus/qrels/test.tsv | sed 's/\t/\tQ0\t/' > collections/nfcorpus/qrels/test.qrels
+      - name: Encode Contriever NFCorpus and build Faiss index
+        run: |
+          python -m pyserini.encode \
+            input --corpus collections/nfcorpus/corpus.jsonl --fields title text \
+            output --embeddings indexes/faiss.nfcorpus.contriever-msmarco --to-faiss \
+            encoder --encoder facebook/contriever-msmarco --device cpu --pooling mean \
+                    --fields title text --batch 16
+      - name: Retrieve and evaluate Contriever
+        run: |
+          python -m pyserini.search.faiss \
+            --encoder-class contriever --encoder facebook/contriever-msmarco \
+            --index indexes/faiss.nfcorpus.contriever-msmarco \
+            --topics collections/nfcorpus/queries.tsv \
+            --output runs/run.beir-contriever-msmarco.nfcorpus.txt \
+            --batch 64 --threads 4 --hits 1000
+          python -m pyserini.eval.trec_eval \
+            -c -m ndcg_cut.10 collections/nfcorpus/qrels/test.qrels \
+            runs/run.beir-contriever-msmarco.nfcorpus.txt | tee contriever-eval.txt
+      - name: Interactive Contriever check
+        run: |
+          python - <<'PY' | tee contriever-interactive.txt
+          from pyserini.search.faiss import FaissSearcher
+          from pyserini.encode import AutoQueryEncoder
+          encoder = AutoQueryEncoder('facebook/contriever-msmarco', device='cpu', pooling='mean')
+          searcher = FaissSearcher('indexes/faiss.nfcorpus.contriever-msmarco', encoder)
+          hits = searcher.search('How to Help Prevent Abdominal Aortic Aneurysms', k=10)
+          for i,h in enumerate(hits,1): print(i,h.docid,f'{h.score:.6f}')
+          assert hits[0].docid == 'MED-4555'
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nfcorpus-contriever-evidence
+          path: |
+            contriever-eval.txt
+            contriever-interactive.txt
