@@ -44,7 +44,7 @@ jobs:
           assert 'site-packages' in pyserini.__file__, pyserini.__file__
           PY
 
-      - name: Check SPLADE-v3 access
+      - name: Check SPLADE-v3 gated file access
         id: access
         run: |
           mkdir -p /tmp/pyserini-splade/evidence
@@ -54,13 +54,18 @@ jobs:
             exit 0
           fi
           cd /tmp/pyserini-splade
-          python - <<'PY'
+          if python - <<'PY'
           import os
-          from huggingface_hub import HfApi
-          HfApi(token=os.environ['HF_TOKEN']).model_info('naver/splade-v3')
-          print('Authenticated access to naver/splade-v3 confirmed.')
+          from huggingface_hub import hf_hub_download
+          path = hf_hub_download('naver/splade-v3', 'config.json', token=os.environ['HF_TOKEN'])
+          print('Authenticated file access confirmed:', path)
           PY
-          echo "available=true" >> "$GITHUB_OUTPUT"
+          then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SPLADE-v3 reproduction blocked: HF_TOKEN is valid, but this Hugging Face account is not authorized for the gated naver/splade-v3 model. Request/accept access at https://huggingface.co/naver/splade-v3, then rerun." | tee /tmp/pyserini-splade/evidence/splade-status.txt
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare NFCorpus
         if: steps.access.outputs.available == 'true'
