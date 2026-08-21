@@ -30,19 +30,22 @@ jobs:
           df -h
 
       - name: Install Pyserini runtime
+        working-directory: /tmp
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyserini
           python - <<'PY'
           import pyserini, sys
           print('PYTHON', sys.version)
-          print('PYSERINI', getattr(pyserini, '__version__', 'unknown'))
+          print('PYSERINI_PATH', pyserini.__file__)
           PY
           java -version
 
       - name: Reproduce MS MARCO BM25 baseline
+        working-directory: /tmp
         run: |
-          mkdir -p runs
+          mkdir -p pyserini-onboarding/runs
+          cd pyserini-onboarding
           python -m pyserini.search.lucene \
             --threads 8 --batch-size 64 \
             --index msmarco-v1-passage \
@@ -56,6 +59,7 @@ jobs:
             runs/run.msmarco-passage.bm25.txt | tee /tmp/msmarco-mrr.txt
 
       - name: Reproduce TREC metrics
+        working-directory: /tmp/pyserini-onboarding
         run: |
           python -m pyserini.search.lucene \
             --threads 8 --batch-size 64 \
@@ -69,6 +73,7 @@ jobs:
             runs/run.msmarco-passage.bm25.trec | tee /tmp/msmarco-trec.txt
 
       - name: Verify interactive retrieval
+        working-directory: /tmp
         run: |
           python - <<'PY' | tee /tmp/interactive.txt
           from pyserini.search.lucene import LuceneSearcher
@@ -86,7 +91,6 @@ jobs:
           {
             echo '# Pyserini onboarding reproduction: MS MARCO BM25'
             echo
-            echo 'Pyserini main-trunk commit reference: e863f8e301990cab979f327f5b292ddfcc94a1f7'
             echo 'Environment: Ubuntu 24.04, Python 3.12, Java 21'
             echo 'Index: official prebuilt msmarco-v1-passage'
             echo 'BM25: k1=0.82, b=0.68, hits=1000'
