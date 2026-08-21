@@ -41,22 +41,70 @@ jobs:
           PY
           java -version
 
-      - name: Reproduce MS MARCO BM25 baseline
+      - name: Fetch current Castorini evaluation data
         working-directory: /tmp
         run: |
-          mkdir -p pyserini-onboarding/runs
-          cd pyserini-onboarding
+          mkdir -p pyserini-onboarding/runs pyserini-onboarding/eval
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/castorini/eval/master/topics/topics.msmarco-passage.dev-subset.txt \
+            -o pyserini-onboarding/eval/msmarco-passage-dev-subset.txt
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/castorini/eval/master/qrels/qrels.msmarco-passage.dev-subset.txt \
+            -o pyserini-onboarding/eval/qrels.msmarco-passage.dev-subset.txt
+          test -s pyserini-onboarding/eval/msmarco-passage-dev-subset.txt
+          test -s pyserini-onboarding/eval/qrels.msmarco-passage.dev-subset.txt
+          echo "topics=$(wc -l < pyserini-onboarding/eval/msmarco-passage-dev-subset.txt)"
+          echo "qrels=$(wc -l < pyserini-onboarding/eval/qrels.msmarco-passage.dev-subset.txt)"
+
+      - name: Reproduce MS MARCO BM25 baseline
+        working-directory: /tmp/pyserini-onboarding
+        run: |
           python -m pyserini.search.lucene \
             --threads 8 --batch-size 64 \
             --index msmarco-v1-passage \
-            --topics msmarco-passage-dev-subset \
+            --topics eval/msmarco-passage-dev-subset.txt \
             --output runs/run.msmarco-passage.bm25.txt \
             --hits 1000 \
             --bm25 --k1 0.82 --b 0.68 \
             --output-format msmarco
-          python -m pyserini.eval.msmarco_passage_eval \
-            msmarco-passage-dev-subset \
-            runs/run.msmarco-passage.bm25.txt | tee /tmp/msmarco-mrr.txt
+          test -s runs/run.msmarco-passage.bm25.txt
+
+      - name: Evaluate MRR@10 from local qrels
+        working-directory: /tmp/pyserini-onboarding
+        run: |
+          python - <<'PY' | tee /tmp/msmarco-mrr.txt
+          from collections import defaultdict
+
+          qrels = defaultdict(set)
+          with open('eval/qrels.msmarco-passage.dev-subset.txt') as f:
+              for line in f:
+                  qid, _, docid, rel = line.split()
+                  if int(rel) > 0:
+                      qrels[qid].add(docid)
+
+          ranked = defaultdict(list)
+          with open('runs/run.msmarco-passage.bm25.txt') as f:
+              for line in f:
+                  parts = line.split()
+                  qid, docid = parts[0], parts[1]
+                  if len(ranked[qid]) < 10:
+                      ranked[qid].append(docid)
+
+          rr = []
+          for qid in qrels:
+              value = 0.0
+              for rank, docid in enumerate(ranked.get(qid, []), 1):
+                  if docid in qrels[qid]:
+                      value = 1.0 / rank
+                      break
+              rr.append(value)
+
+          mrr = sum(rr) / len(rr)
+          print(f'MRR@10 {mrr:.10f}')
+          print(f'QueriesRanked {len(rr)}')
+          assert abs(mrr - 0.1874) < 0.0002, mrr
+          assert len(rr) == 6980, len(rr)
+          PY
 
       - name: Reproduce TREC metrics
         working-directory: /tmp/pyserini-onboarding
@@ -64,13 +112,15 @@ jobs:
           python -m pyserini.search.lucene \
             --threads 8 --batch-size 64 \
             --index msmarco-v1-passage \
-            --topics msmarco-passage-dev-subset \
+            --topics eval/msmarco-passage-dev-subset.txt \
             --output runs/run.msmarco-passage.bm25.trec \
             --hits 1000 \
             --bm25 --k1 0.82 --b 0.68
           python -m pyserini.eval.trec_eval -c -mrecall.1000 -mmap \
-            msmarco-passage-dev-subset \
+            eval/qrels.msmarco-passage.dev-subset.txt \
             runs/run.msmarco-passage.bm25.trec | tee /tmp/msmarco-trec.txt
+          grep -E 'map[[:space:]]+all[[:space:]]+0\.195[78]' /tmp/msmarco-trec.txt
+          grep -E 'recall_1000[[:space:]]+all[[:space:]]+0\.8573' /tmp/msmarco-trec.txt
 
       - name: Verify interactive retrieval
         working-directory: /tmp
@@ -93,6 +143,7 @@ jobs:
             echo
             echo 'Environment: Ubuntu 24.04, Python 3.12, Java 21'
             echo 'Index: official prebuilt msmarco-v1-passage'
+            echo 'Topics/qrels: current castorini/eval repository'
             echo 'BM25: k1=0.82, b=0.68, hits=1000'
             echo
             cat /tmp/msmarco-mrr.txt 2>/dev/null || true
