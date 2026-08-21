@@ -1,0 +1,111 @@
+name: onboarding-reproduction
+
+on:
+  push:
+    branches: [onboarding-reproduction]
+  pull_request:
+    branches: [master]
+
+jobs:
+  msmarco-bm25:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install Pyserini runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyserini
+          python - <<'PY'
+          import pyserini, sys
+          print('PYTHON', sys.version)
+          print('PYSERINI', getattr(pyserini, '__version__', 'unknown'))
+          PY
+          java -version
+
+      - name: Reproduce MS MARCO BM25 baseline
+        run: |
+          mkdir -p runs
+          python -m pyserini.search.lucene \
+            --threads 8 --batch-size 64 \
+            --index msmarco-v1-passage \
+            --topics msmarco-passage-dev-subset \
+            --output runs/run.msmarco-passage.bm25.txt \
+            --hits 1000 \
+            --bm25 --k1 0.82 --b 0.68 \
+            --output-format msmarco
+          python -m pyserini.eval.msmarco_passage_eval \
+            msmarco-passage-dev-subset \
+            runs/run.msmarco-passage.bm25.txt | tee /tmp/msmarco-mrr.txt
+
+      - name: Reproduce TREC metrics
+        run: |
+          python -m pyserini.search.lucene \
+            --threads 8 --batch-size 64 \
+            --index msmarco-v1-passage \
+            --topics msmarco-passage-dev-subset \
+            --output runs/run.msmarco-passage.bm25.trec \
+            --hits 1000 \
+            --bm25 --k1 0.82 --b 0.68
+          python -m pyserini.eval.trec_eval -c -mrecall.1000 -mmap \
+            msmarco-passage-dev-subset \
+            runs/run.msmarco-passage.bm25.trec | tee /tmp/msmarco-trec.txt
+
+      - name: Verify interactive retrieval
+        run: |
+          python - <<'PY' | tee /tmp/interactive.txt
+          from pyserini.search.lucene import LuceneSearcher
+          searcher = LuceneSearcher.from_prebuilt_index('msmarco-v1-passage')
+          searcher.set_bm25(0.82, 0.68)
+          hits = searcher.search("what is paula deen's brother", k=10)
+          for i, h in enumerate(hits, start=1):
+              print(i, h.docid, f'{h.score:.6f}')
+          assert hits[0].docid == '7187158', hits[0].docid
+          PY
+
+      - name: Write evidence summary
+        if: always()
+        run: |
+          {
+            echo '# Pyserini onboarding reproduction: MS MARCO BM25'
+            echo
+            echo 'Pyserini main-trunk commit reference: e863f8e301990cab979f327f5b292ddfcc94a1f7'
+            echo 'Environment: Ubuntu 24.04, Python 3.12, Java 21'
+            echo 'Index: official prebuilt msmarco-v1-passage'
+            echo 'BM25: k1=0.82, b=0.68, hits=1000'
+            echo
+            cat /tmp/msmarco-mrr.txt 2>/dev/null || true
+            cat /tmp/msmarco-trec.txt 2>/dev/null || true
+            echo
+            echo 'Interactive top-10:'
+            cat /tmp/interactive.txt 2>/dev/null || true
+          } | tee reproduction-summary.txt
+          cat reproduction-summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pyserini-msmarco-bm25-reproduction
+          path: |
+            reproduction-summary.txt
+            /tmp/msmarco-mrr.txt
+            /tmp/msmarco-trec.txt
+            /tmp/interactive.txt
+          if-no-files-found: ignore
