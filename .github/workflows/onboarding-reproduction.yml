@@ -53,21 +53,41 @@ jobs:
             -o pyserini-onboarding/eval/qrels.msmarco-passage.dev-subset.txt
           test -s pyserini-onboarding/eval/msmarco-passage-dev-subset.txt
           test -s pyserini-onboarding/eval/qrels.msmarco-passage.dev-subset.txt
+          test "$(wc -l < pyserini-onboarding/eval/msmarco-passage-dev-subset.txt)" -eq 6980
           echo "topics=$(wc -l < pyserini-onboarding/eval/msmarco-passage-dev-subset.txt)"
           echo "qrels=$(wc -l < pyserini-onboarding/eval/qrels.msmarco-passage.dev-subset.txt)"
 
-      - name: Reproduce MS MARCO BM25 baseline
+      - name: Reproduce MS MARCO BM25 baseline with Python API
         working-directory: /tmp/pyserini-onboarding
         run: |
-          python -m pyserini.search.lucene \
-            --threads 8 --batch-size 64 \
-            --index msmarco-v1-passage \
-            --topics eval/msmarco-passage-dev-subset.txt \
-            --output runs/run.msmarco-passage.bm25.txt \
-            --hits 1000 \
-            --bm25 --k1 0.82 --b 0.68 \
-            --output-format msmarco
+          python - <<'PY'
+          from pyserini.search.lucene import LuceneSearcher
+
+          qids, queries = [], []
+          with open('eval/msmarco-passage-dev-subset.txt', encoding='utf-8') as f:
+              for line in f:
+                  qid, query = line.rstrip('\n').split('\t', 1)
+                  qids.append(qid)
+                  queries.append(query)
+
+          assert len(qids) == 6980, len(qids)
+          searcher = LuceneSearcher.from_prebuilt_index('msmarco-v1-passage')
+          searcher.set_bm25(0.82, 0.68)
+          results = searcher.batch_search(queries, qids, k=1000, threads=8)
+          assert len(results) == 6980, len(results)
+
+          with open('runs/run.msmarco-passage.bm25.txt', 'w', encoding='utf-8') as msmarco, \
+               open('runs/run.msmarco-passage.bm25.trec', 'w', encoding='utf-8') as trec:
+              for qid in qids:
+                  hits = results.get(qid, [])
+                  for rank, hit in enumerate(hits, start=1):
+                      msmarco.write(f'{qid}\t{hit.docid}\t{rank}\n')
+                      trec.write(f'{qid} Q0 {hit.docid} {rank} {hit.score:.8f} pyserini-bm25\n')
+
+          print('QueriesRanked:', len(results))
+          PY
           test -s runs/run.msmarco-passage.bm25.txt
+          test -s runs/run.msmarco-passage.bm25.trec
 
       - name: Evaluate MRR@10 from local qrels
         working-directory: /tmp/pyserini-onboarding
@@ -75,47 +95,36 @@ jobs:
           python - <<'PY' | tee /tmp/msmarco-mrr.txt
           from collections import defaultdict
 
-          qrels = defaultdict(set)
+          relevant = defaultdict(set)
           with open('eval/qrels.msmarco-passage.dev-subset.txt') as f:
               for line in f:
                   qid, _, docid, rel = line.split()
                   if int(rel) > 0:
-                      qrels[qid].add(docid)
+                      relevant[qid].add(docid)
 
           ranked = defaultdict(list)
           with open('runs/run.msmarco-passage.bm25.txt') as f:
               for line in f:
-                  parts = line.split()
-                  qid, docid = parts[0], parts[1]
-                  if len(ranked[qid]) < 10:
+                  qid, docid, rank = line.split()
+                  if int(rank) <= 10:
                       ranked[qid].append(docid)
 
-          rr = []
-          for qid in qrels:
-              value = 0.0
-              for rank, docid in enumerate(ranked.get(qid, []), 1):
-                  if docid in qrels[qid]:
-                      value = 1.0 / rank
+          rr = 0.0
+          for qid in relevant:
+              for rank, docid in enumerate(ranked.get(qid, []), start=1):
+                  if docid in relevant[qid]:
+                      rr += 1.0 / rank
                       break
-              rr.append(value)
-
-          mrr = sum(rr) / len(rr)
-          print(f'MRR@10 {mrr:.10f}')
-          print(f'QueriesRanked {len(rr)}')
-          assert abs(mrr - 0.1874) < 0.0002, mrr
-          assert len(rr) == 6980, len(rr)
+          mrr = rr / len(relevant)
+          print(f'MRR @10: {mrr:.16f}')
+          print(f'QueriesRanked: {len(ranked)}')
+          assert len(ranked) == 6980, len(ranked)
+          assert abs(mrr - 0.18741227770955546) < 1e-6, mrr
           PY
 
       - name: Reproduce TREC metrics
         working-directory: /tmp/pyserini-onboarding
         run: |
-          python -m pyserini.search.lucene \
-            --threads 8 --batch-size 64 \
-            --index msmarco-v1-passage \
-            --topics eval/msmarco-passage-dev-subset.txt \
-            --output runs/run.msmarco-passage.bm25.trec \
-            --hits 1000 \
-            --bm25 --k1 0.82 --b 0.68
           python -m pyserini.eval.trec_eval -c -mrecall.1000 -mmap \
             eval/qrels.msmarco-passage.dev-subset.txt \
             runs/run.msmarco-passage.bm25.trec | tee /tmp/msmarco-trec.txt
@@ -144,6 +153,7 @@ jobs:
             echo 'Environment: Ubuntu 24.04, Python 3.12, Java 21'
             echo 'Index: official prebuilt msmarco-v1-passage'
             echo 'Topics/qrels: current castorini/eval repository'
+            echo 'Execution: LuceneSearcher.batch_search (bypasses CLI topic-order bug)'
             echo 'BM25: k1=0.82, b=0.68, hits=1000'
             echo
             cat /tmp/msmarco-mrr.txt 2>/dev/null || true
