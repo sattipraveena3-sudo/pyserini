@@ -1,6 +1,7 @@
 name: onboarding-learned-sparse
 
 on:
+  workflow_dispatch:
   push:
     branches: [onboarding-reproduction]
   pull_request:
