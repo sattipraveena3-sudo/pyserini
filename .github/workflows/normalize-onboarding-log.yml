@@ -1,0 +1,40 @@
+name: normalize-onboarding-log
+
+on:
+  push:
+    branches: [onboarding-reproduction]
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: onboarding-reproduction
+      - name: Normalize log spacing and remove helper workflow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          marker = '+ Results reproduced by [@sattipraveena3-sudo]'
+          for name in [
+              'docs/experiments-msmarco-passage.md',
+              'docs/conceptual-framework.md',
+              'docs/experiments-nfcorpus.md',
+              'docs/conceptual-framework2.md',
+          ]:
+              p=Path(name)
+              s=p.read_text()
+              s=s.replace('\n\n'+marker, '\n'+marker)
+              p.write_text(s)
+          PY
+          git rm .github/workflows/normalize-onboarding-log.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs .github/workflows/normalize-onboarding-log.yml
+          git diff --cached --check
+          git commit -m 'Normalize onboarding reproduction logs'
+          git push origin HEAD:onboarding-reproduction
