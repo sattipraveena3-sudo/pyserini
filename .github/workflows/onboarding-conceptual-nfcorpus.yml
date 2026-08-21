@@ -78,9 +78,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyserini faiss-cpu
+      - name: Verify packaged Pyserini import
+        run: |
+          mkdir -p /tmp/pyserini-nfcorpus
+          cd /tmp/pyserini-nfcorpus
+          python - <<'PY'
+          import pyserini
+          print(pyserini.__file__)
+          assert 'site-packages' in pyserini.__file__, pyserini.__file__
+          PY
       - name: Prepare NFCorpus
         run: |
-          mkdir -p collections indexes runs
+          cd /tmp/pyserini-nfcorpus
+          mkdir -p collections indexes runs evidence
           wget -q https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip -P collections
           unzip -q collections/nfcorpus.zip -d collections
           python - <<'PY'
@@ -92,6 +102,7 @@ jobs:
           tail -n +2 collections/nfcorpus/qrels/test.tsv | sed 's/\t/\tQ0\t/' > collections/nfcorpus/qrels/test.qrels
       - name: Encode Contriever NFCorpus and build Faiss index
         run: |
+          cd /tmp/pyserini-nfcorpus
           python -m pyserini.encode \
             input --corpus collections/nfcorpus/corpus.jsonl --fields title text \
             output --embeddings indexes/faiss.nfcorpus.contriever-msmarco --to-faiss \
@@ -99,6 +110,7 @@ jobs:
                     --fields title text --batch 16
       - name: Retrieve and evaluate Contriever
         run: |
+          cd /tmp/pyserini-nfcorpus
           python -m pyserini.search.faiss \
             --encoder-class contriever --encoder facebook/contriever-msmarco \
             --index indexes/faiss.nfcorpus.contriever-msmarco \
@@ -107,10 +119,12 @@ jobs:
             --batch 64 --threads 4 --hits 1000
           python -m pyserini.eval.trec_eval \
             -c -m ndcg_cut.10 collections/nfcorpus/qrels/test.qrels \
-            runs/run.beir-contriever-msmarco.nfcorpus.txt | tee contriever-eval.txt
+            runs/run.beir-contriever-msmarco.nfcorpus.txt | tee evidence/contriever-eval.txt
+          grep -E 'ndcg_cut_10[[:space:]]+all' evidence/contriever-eval.txt
       - name: Interactive Contriever check
         run: |
-          python - <<'PY' | tee contriever-interactive.txt
+          cd /tmp/pyserini-nfcorpus
+          python - <<'PY' | tee evidence/contriever-interactive.txt
           from pyserini.search.faiss import FaissSearcher
           from pyserini.encode import AutoQueryEncoder
           encoder = AutoQueryEncoder('facebook/contriever-msmarco', device='cpu', pooling='mean')
@@ -123,6 +137,5 @@ jobs:
         if: always()
         with:
           name: nfcorpus-contriever-evidence
-          path: |
-            contriever-eval.txt
-            contriever-interactive.txt
+          path: /tmp/pyserini-nfcorpus/evidence/
+          if-no-files-found: warn
